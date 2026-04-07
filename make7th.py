@@ -426,6 +426,11 @@ def main():
         "--force", action="store_true",
         help="Re-encode all chunks even if source frames are unchanged.",
     )
+    parser.add_argument(
+        "--no-manifest", action="store_true",
+        help="Do not read or write the incremental manifest. Use for one-shot "
+             "jobs or when distributing a render across multiple machines.",
+    )
     args = parser.parse_args()
 
     # Resolve output: directory or directory/basename 
@@ -501,7 +506,7 @@ def main():
         prefix = in_prefix
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    manifest = Manifest(output_dir)
+    manifest = None if args.no_manifest else Manifest(output_dir)
 
     print(f"Frames : {len(frames)} PNGs -> {len(chunks)} .7th files  ({W}x{H}, {expected_size:,} bytes each)")
     if range_start is not None:
@@ -510,6 +515,8 @@ def main():
         print(f"Renum  : output starts at {renum_start:05d}")
     if args.force:
         print(f"Mode   : forced (re-encoding all chunks)")
+    if args.no_manifest:
+        print(f"Mode   : no manifest (every chunk will be encoded)")
     print(f"Output : {output_dir}/  (prefix: {prefix})")
     print()
 
@@ -525,7 +532,7 @@ def main():
         # has changed (or is absent) since it was last recorded in the manifest.
         source_paths = [entry[3] for entry in chunk.values()]
 
-        if not args.force and not any(manifest.is_changed(p) for p in source_paths):
+        if manifest is not None and not args.force and not any(manifest.is_changed(p) for p in source_paths):
             print(f"  [{idx}/{total}]  {out_path.name}  (unchanged, skipped)")
             skipped_count += 1
             continue
@@ -555,9 +562,10 @@ def main():
                   file=sys.stderr)
 
         # Record all source frames for this chunk in the manifest.
-        for p in source_paths:
-            manifest.record(p)
-        manifest.save()
+        if manifest is not None:
+            for p in source_paths:
+                manifest.record(p)
+            manifest.save()
         encoded_count += 1
 
     print(f"\nDone.  Encoded: {encoded_count}  Skipped: {skipped_count}")
