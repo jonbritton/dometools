@@ -521,15 +521,14 @@ def main():
         out_num  = renum_start + (idx - 1) * NUM_FRAMES if renum_start is not None else cs
         out_path = output_path(prefix, digit_width, out_num, output_dir)
 
-        # A chunk needs encoding if forced, the .7th is missing, or any
-        # source frame in the chunk has changed since it was last encoded.
+        # A chunk needs encoding if forced or any source frame in the chunk
+        # has changed (or is absent) since it was last recorded in the manifest.
         source_paths = [entry[3] for entry in chunk.values()]
 
-        if not args.force and out_path.exists():
-            if not any(manifest.is_changed(p) for p in source_paths):
-                print(f"  [{idx}/{total}]  {out_path.name}  (unchanged, skipped)")
-                skipped_count += 1
-                continue
+        if not args.force and not any(manifest.is_changed(p) for p in source_paths):
+            print(f"  [{idx}/{total}]  {out_path.name}  (unchanged, skipped)")
+            skipped_count += 1
+            continue
         # do encoding
         filled = NUM_FRAMES - len(chunk)
         status = f"({len(chunk)}/10 frames" + (f", {filled} filled)" if filled else ")")

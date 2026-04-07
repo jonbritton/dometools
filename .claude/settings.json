@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(~/project/dome/.domenv/bin/python -c \"import numpy, PIL.Image; print\\('ok'\\)\")",
+      "Bash(~/project/dome/.domenv/bin/python -m pip list)",
+      "Bash(~/project/dome/.domenv/bin/python -m pip install Pillow)",
+      "Read(//tmp/m7test/**)",
+      "Bash(~/project/dome/.domenv/bin/python /home/jon/project/dome/dometools/make7th.py in/ out/)"
+    ]
+  }
+}
