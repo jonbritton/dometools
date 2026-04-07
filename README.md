@@ -1,2 +1,3 @@
 # dometools
-Tools for immersive theaters.
+Tools for domes.
+
