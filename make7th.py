@@ -42,7 +42,7 @@ try:
 except ImportError:
     HAS_OPENEXR = False
 
-# ── Constants ────────────────────────────────────────────────────────────────
+# constants
 
 MAGIC       = b"7th \n\n\x00\x00"   # 8-byte file signature
 NUM_FRAMES  = 10
@@ -66,7 +66,7 @@ MARKER_COL_BASE = 4060    # pixel column of the first marker (frame 0)
 MARKER_COL_STEP = 4       # columns per frame
 
 
-# ── Color conversion ─────────────────────────────────────────────────────────
+# Color conversion 
 
 def rgb_float_to_yuyv(rgb: np.ndarray) -> np.ndarray:
     """
@@ -110,8 +110,7 @@ def rgb_float_to_yuyv(rgb: np.ndarray) -> np.ndarray:
     return yuyv
 
 
-# ── I/O helpers ──────────────────────────────────────────────────────────────
-
+# I/O helpers 
 def load_png(path):
     """
     Load a PNG (8- or 16-bit, RGB or RGBA) and return a float32 H×W×3
@@ -262,7 +261,7 @@ def make_header(W: int, H: int) -> bytes:
     return bytes(hdr)
 
 
-# ── Incremental build manifest ───────────────────────────────────────────────
+# Incremental build manifest - Just snag the new files and convert them
 
 MANIFEST_FILE = ".make7th_state.json"
 
@@ -319,7 +318,7 @@ class Manifest:
             self._dirty = False
 
 
-# ── Frame discovery and grouping ─────────────────────────────────────────────
+# Frame discovery and grouping 
 
 # Matches the trailing frame number in names like "show.1080p.00042.png"
 _FRAME_RE = re.compile(r'^(.*\D)(\d+)$')
@@ -396,7 +395,7 @@ def detect_size(path):
         return img.size   # (width, height)
 
 
-# ── Main ─────────────────────────────────────────────────────────────────────
+# MAIN 
 
 def main():
     parser = argparse.ArgumentParser(
@@ -429,7 +428,7 @@ def main():
     )
     args = parser.parse_args()
 
-    # ── Resolve output: directory or directory/basename ───────────────────────
+    # Resolve output: directory or directory/basename 
     raw_out = args.output
     out_arg = Path(raw_out)
     if raw_out.endswith(("/", "\\")) or out_arg.is_dir():
@@ -460,7 +459,7 @@ def main():
         print("Error: no input files found.", file=sys.stderr)
         sys.exit(1)
 
-    # ── Parse --renum ─────────────────────────────────────────────────────────
+    # Parse --renum  (decides if output 7th files shoudl e numbered starting at 0 or the input number)
     if args.renum.lower() == "false":
         renum_start = None           # keep original frame numbers
     else:
@@ -471,7 +470,7 @@ def main():
                   file=sys.stderr)
             sys.exit(1)
 
-    # ── Parse optional frame range ────────────────────────────────────────────
+    # Parse optional frame range 
     range_start = range_end = None
     if args.frame_range:
         try:
@@ -482,7 +481,7 @@ def main():
                   file=sys.stderr)
             sys.exit(1)
 
-    # ── Discover and group frames ─────────────────────────────────────────────
+    # Discover and group frames 
     frames = collect_frames(input_paths, range_start, range_end)
     if not frames:
         print("Error: no matching PNG frames found.", file=sys.stderr)
@@ -522,7 +521,6 @@ def main():
         out_num  = renum_start + (idx - 1) * NUM_FRAMES if renum_start is not None else cs
         out_path = output_path(prefix, digit_width, out_num, output_dir)
 
-        # ── Incremental check ────────────────────────────────────────────────
         # A chunk needs encoding if forced, the .7th is missing, or any
         # source frame in the chunk has changed since it was last encoded.
         source_paths = [entry[3] for entry in chunk.values()]
@@ -532,8 +530,7 @@ def main():
                 print(f"  [{idx}/{total}]  {out_path.name}  (unchanged, skipped)")
                 skipped_count += 1
                 continue
-
-        # ── Encode ───────────────────────────────────────────────────────────
+        # do encoding
         filled = NUM_FRAMES - len(chunk)
         status = f"({len(chunk)}/10 frames" + (f", {filled} filled)" if filled else ")")
         print(f"  [{idx}/{total}]  {out_path.name}  {status}")
