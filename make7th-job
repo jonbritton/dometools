@@ -1,0 +1,20 @@
+#!/bin/bash
+# make7th-job. — convert frames, then rsync. Safe for cron.
+set -euo pipefail
+
+SRC_FRAMES="$1"
+LOCAL_OUT="$2"
+REMOTE_DEST="/mnt/DELTA # mount point for the delta
+PY="/mnt/d1/dometools/.domenv/bin/python"
+MAKE7TH="/mnt/d1/dometools/make7th.py"
+LOG="$HOME/logs/make7th.log"
+
+mkdir -p "$(dirname "$LOG")" "$LOCAL_OUT"   
+
+{
+  echo "=== $(date -Is) start ==="
+  "$PY" "$MAKE7TH" "$SRC_FRAMES" "$LOCAL_OUT"
+  echo "--- conversion done, starting rsync ---"
+  rsync -a --partial --info=stats2 "$LOCAL_OUT/" "$REMOTE_DEST"
+  echo "=== $(date -Is) done ==="
+} >> "$LOG" 2>&1
