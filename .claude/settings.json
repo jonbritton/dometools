@@ -11,7 +11,9 @@
       "Read(//home/jon/project/dome/**)",
       "Bash(python3 -c \"import numpy\")",
       "Bash(pip3 install:*)",
-      "Read(//home/jon/project/**)"
+      "Read(//home/jon/project/**)",
+      "Bash(ls /home/jon/project/dome/dometools/*.7th)",
+      "Bash(python3 -c ':*)"
     ]
   }
 }
