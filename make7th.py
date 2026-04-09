@@ -209,6 +209,31 @@ def make_fill_frame(W: int, H: int) -> bytearray:
     return frame
 
 
+def shift_yuyv_left(yuyv: np.ndarray, pixel_shift: int) -> np.ndarray:
+    """
+    Shift a YUYV frame (H × W*2 uint8 array) LEFT by pixel_shift pixels.
+
+    The shift must be a multiple of 2 (YUYV macropixel alignment).
+    Vacated columns on the right are filled with neutral black
+    (Y=0x00, Cb=0x7f, Cr=0x7f).  Returns a new array.
+    """
+    if pixel_shift <= 0:
+        return yuyv
+    if pixel_shift % 2 != 0:
+        raise ValueError(f"pixel_shift must be even for YUYV, got {pixel_shift}")
+
+    byte_shift = (pixel_shift // 2) * 4   # each macropixel = 4 bytes
+    H, row_bytes = yuyv.shape
+    out = np.empty_like(yuyv)
+    # Shift content left
+    out[:, :row_bytes - byte_shift] = yuyv[:, byte_shift:]
+    # Fill right edge with neutral YUYV pattern
+    fill = np.array([0x00, 0x7f, 0x00, 0x7f], dtype=np.uint8)
+    fill_cols = byte_shift
+    out[:, row_bytes - fill_cols:] = np.tile(fill, fill_cols // 4)
+    return out
+
+
 def stamp_marker(frame: bytearray, W: int, H: int, frame_index: int) -> None:
     """
     Write the 8-byte sync watermark into the frame buffer in-place.
@@ -549,6 +574,16 @@ def main():
                     _, _, _, img_path = chunk[i]
                     rgb   = load_frame(img_path)
                     yuyv  = rgb_float_to_yuyv(rgb)
+                else:
+                    yuyv  = None
+
+                # Per-frame horizontal shift: the player expects each
+                # frame i to be shifted LEFT by (9-i)*4 pixels relative
+                # to the source image.  Frame 9 has no shift.
+                pixel_shift = (NUM_FRAMES - 1 - i) * MARKER_COL_STEP
+
+                if yuyv is not None:
+                    yuyv  = shift_yuyv_left(yuyv, pixel_shift)
                     frame = bytearray(yuyv.tobytes())
                 else:
                     frame = make_fill_frame(W, H)

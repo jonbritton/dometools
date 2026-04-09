@@ -5,7 +5,13 @@
       "Bash(~/project/dome/.domenv/bin/python -m pip list)",
       "Bash(~/project/dome/.domenv/bin/python -m pip install Pillow)",
       "Read(//tmp/m7test/**)",
-      "Bash(~/project/dome/.domenv/bin/python /home/jon/project/dome/dometools/make7th.py in/ out/)"
+      "Bash(~/project/dome/.domenv/bin/python /home/jon/project/dome/dometools/make7th.py in/ out/)",
+      "Bash(python3)",
+      "Bash(ls -la /home/jon/project/dome/dometools/*.7th)",
+      "Read(//home/jon/project/dome/**)",
+      "Bash(python3 -c \"import numpy\")",
+      "Bash(pip3 install:*)",
+      "Read(//home/jon/project/**)"
     ]
   }
 }
