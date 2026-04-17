@@ -48,11 +48,14 @@ MAGIC       = b"7th \n\n\x00\x00"   # 8-byte file signature
 NUM_FRAMES  = 10
 HEADER_SIZE = 100
 
-# BT.709 luma coefficients (ITU-R BT.709 / sRGB primaries)
+# BT.601 luma coefficients — matches DFM reference encoder output.
+# (BT.709 was previously used here; comparison against DFM .7th files
+# shows mid-tone Y values systematically ~2 LSB higher with BT.709,
+# and ~0.5 RMS / 78% byte-exact match with BT.601.)
 # Y  =  Kr·R + (1-Kr-Kb)·G + Kb·B
 # Cb = (B - Y) / (2·(1-Kb)) + 0.5
 # Cr = (R - Y) / (2·(1-Kr)) + 0.5
-KR, KG, KB = 0.2126, 0.7152, 0.0722
+KR, KG, KB = 0.299, 0.587, 0.114
 
 # Fill pattern for missing/empty frames (black, near-neutral chroma)
 # YUYV: [Y0=0x00, Cb=0x7f, Y1=0x00, Cr=0x7f] repeating
@@ -85,7 +88,7 @@ def rgb_float_to_yuyv(rgb: np.ndarray) -> np.ndarray:
     G = rgb[..., 1]
     B = rgb[..., 2]
 
-    # BT.709 RGB → YCbCr (full range, floating point, output 0-1)
+    # BT.601 RGB → YCbCr (full range, floating point, output 0-1)
     Y  =  KR * R + KG * G + KB * B
     Cb = (B - Y) / (2.0 * (1.0 - KB)) + 0.5
     Cr = (R - Y) / (2.0 * (1.0 - KR)) + 0.5
@@ -207,6 +210,36 @@ def make_fill_frame(W: int, H: int) -> bytearray:
     row    = bytes(tile)
     frame  = bytearray(row * H)
     return frame
+
+
+def shift_yuyv_left(yuyv: np.ndarray, pixel_shift: int) -> np.ndarray:
+    """
+    Shift a YUYV frame (H × W*2 uint8 array) LEFT by pixel_shift pixels.
+
+    The DFM reference encoder applies a per-slot horizontal shift:
+    content in slot i is shifted left by (9-i)*4 pixels, so slot 0
+    gets shifted 36 px and slot 9 is unshifted.  Without this the
+    player (which reverses the shift at display time) produces a
+    progressive offset within each 10-frame chunk — "right side of
+    one frame appearing on the left side of the screen, gradually
+    re-centering through the chunk."
+
+    The shift must be even (YUYV macropixel alignment).  Vacated
+    columns on the right are filled with neutral black (Y=0x00,
+    Cb=Cr=0x7f).  Returns a new array.
+    """
+    if pixel_shift <= 0:
+        return yuyv
+    if pixel_shift % 2 != 0:
+        raise ValueError(f"pixel_shift must be even for YUYV, got {pixel_shift}")
+
+    byte_shift = (pixel_shift // 2) * 4   # each macropixel = 4 bytes
+    _H, row_bytes = yuyv.shape
+    out = np.empty_like(yuyv)
+    out[:, : row_bytes - byte_shift] = yuyv[:, byte_shift:]
+    fill = np.array([0x00, 0x7f, 0x00, 0x7f], dtype=np.uint8)
+    out[:, row_bytes - byte_shift :] = np.tile(fill, byte_shift // 4)
+    return out
 
 
 def stamp_marker(frame: bytearray, W: int, H: int, frame_index: int) -> None:
@@ -544,16 +577,21 @@ def main():
         with out_path.open("wb") as out:
             out.write(make_header(W, H))
 
-            last_frame = None
+            # Per-slot shift matches the DFM reference encoder; see shift_yuyv_left.
+            # We keep the last *unshifted* YUYV so that missing slots can be filled
+            # with the last real frame re-shifted for their own slot position, not
+            # a black rectangle (which produces a visible loop-boundary glitch).
+            last_yuyv = None
             for i in range(NUM_FRAMES):
                 if i in chunk:
                     _, _, _, img_path = chunk[i]
-                    rgb   = load_frame(img_path)
-                    yuyv  = rgb_float_to_yuyv(rgb)
-                    frame = bytearray(yuyv.tobytes())
-                    last_frame = frame
-                elif last_frame is not None:
-                    frame = bytearray(last_frame)
+                    rgb       = load_frame(img_path)
+                    last_yuyv = rgb_float_to_yuyv(rgb)
+
+                pixel_shift = (NUM_FRAMES - 1 - i) * MARKER_COL_STEP
+                if last_yuyv is not None:
+                    shifted = shift_yuyv_left(last_yuyv, pixel_shift)
+                    frame   = bytearray(shifted.tobytes())
                 else:
                     frame = make_fill_frame(W, H)
 
