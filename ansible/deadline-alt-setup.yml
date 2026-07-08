@@ -1,0 +1,246 @@
+---
+# deadline-alt-setup.yml
+#
+# Provisions a Deadline 10 client in Remote mode: the worker only ever talks
+# to the Remote Connection Server (RCS) over the VPN — never the database or
+# repository share directly.
+#
+# Handles both worker flavours:
+#   * aws_worker=true  – installer and client cert fetched from the S3
+#                        installers bucket (node needs an instance profile
+#                        with read access and the aws CLI).
+#   * aws_worker=false – installer and client cert copied from the mounted
+#                        Viz file server.
+#
+# Safe to re-run: the install is guarded by the deadlinecommand marker, the
+# on-prem cert copy is checksum-based, the RCS connection is only rewritten
+# when it drifts from the desired host:port, and the image pulls converge on
+# the newest 'latest'.
+#
+# The cert password is sensitive — keep it in an Ansible Vault file or pass
+# it with -e, never commit it in plaintext:
+#   ansible-vault encrypt_string 'SuperSecret' --name deadline_cert_password
+#
+# Usage:
+#   ansible-playbook -i inventory deadline-alt-setup.yml -e @secrets.yml --diff
+#
+# The image-pull tasks require the community.docker collection:
+#   ansible-galaxy collection install community.docker
+
+- name: Install and connect the Deadline client (Remote mode), pull farm images
+  hosts: render_nodes
+  become: true
+
+  vars:
+    # ---- Worker flavor ---- #
+    # true for AWS burst workers, false for on-prem nodes. 
+    # Usually set per group in inventory rather than here.
+    aws_worker: false
+
+    # ---- Where the golden artifacts live ---- #
+    installers_bucket: "viz-farm-installers"
+    onprem_installer_path: "/mnt/netshare/installers"
+
+    # ---- Deadline client ---- #
+    deadline_version: "10.4.0.13"
+    install_prefix: "/opt/Thinkbox/Deadline10"
+    deadline_command: "{{ install_prefix }}/bin/deadlinecommand"
+    installer_filename: "DeadlineClient-{{ deadline_version }}-linux-x64-installer.run"
+    installer_tmp: "/tmp/{{ installer_filename }}"
+    render_user: "render"
+
+    # ---- RCS connection ---- #
+    rcs_host: "deadline-rcs.farm.local"
+    rcs_port: 4433
+    deadline_server: "{{ rcs_host }}:{{ rcs_port }}"
+
+    # ---- Private client certificate (TLS to the RCS) ---- #
+    cert_filename: "Deadline10RemoteClient.pfx"
+    deadline_cert_dest: "/opt/Thinkbox/certs/{{ cert_filename }}"
+    # Provide via Vault or -e. Empty string means "no password on the pfx".
+    deadline_cert_password: ""
+
+    # ---- Docker images the farm uses (latest tag pulled each run) ---- #
+    farm_images:
+      - "registry.farm.local/deadline/worker"
+      - "registry.farm.local/render/nuke"
+      - "registry.farm.local/render/houdini"
+
+  tasks:
+    - name: Verify the installer share is mounted (on-prem workers)
+      ansible.builtin.stat:
+        path: "{{ onprem_installer_path }}"
+      register: share_stat
+      when: not (aws_worker | bool)
+
+    - name: Fail early if the share is missing
+      ansible.builtin.fail:
+        msg: "Installer share '{{ onprem_installer_path }}' is not accessible on this host."
+      when:
+        - not (aws_worker | bool)
+        - not share_stat.stat.exists
+
+    - name: Check whether the Deadline client is already installed
+      ansible.builtin.stat:
+        path: "{{ deadline_command }}"
+      register: deadline_installed
+
+    - name: Ensure the certificate directory exists
+      ansible.builtin.file:
+        path: "{{ deadline_cert_dest | dirname }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+
+    # The S3 fetch is guarded by creates:, so a rotated cert needs the old
+    # file removed first. The on-prem copy is checksum-based and picks up
+    # rotation automatically.
+    - name: Fetch client certificate from the installers bucket
+      ansible.builtin.command: >
+        aws s3 cp
+        s3://{{ installers_bucket }}/deadline/{{ cert_filename }}
+        {{ deadline_cert_dest }}
+      args:
+        creates: "{{ deadline_cert_dest }}"
+      when: aws_worker | bool
+
+    - name: Copy client certificate from the Viz file server
+      ansible.builtin.copy:
+        src: "{{ onprem_installer_path }}/deadline/{{ cert_filename }}"
+        dest: "{{ deadline_cert_dest }}"
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0600"
+      when: not (aws_worker | bool)
+
+    - name: Lock down certificate permissions
+      ansible.builtin.file:
+        path: "{{ deadline_cert_dest }}"
+        owner: root
+        group: root
+        mode: "0600"
+
+    # ================================================================== #
+    #  2. INSTALL THE DEADLINE CLIENT                                     #
+    # ================================================================== #
+    - name: Fetch Deadline installer from the installers bucket
+      ansible.builtin.command: >
+        aws s3 cp
+        s3://{{ installers_bucket }}/deadline/{{ installer_filename }}
+        {{ installer_tmp }}
+      args:
+        creates: "{{ installer_tmp }}"
+      when:
+        - aws_worker | bool
+        - not deadline_installed.stat.exists
+
+    - name: Copy Deadline installer from the Viz file server
+      ansible.builtin.copy:
+        src: "{{ onprem_installer_path }}/deadline/{{ installer_filename }}"
+        dest: "{{ installer_tmp }}"
+        remote_src: true
+        mode: "0755"
+      when:
+        - not (aws_worker | bool)
+        - not deadline_installed.stat.exists
+
+    - name: Make installer executable
+      ansible.builtin.file:
+        path: "{{ installer_tmp }}"
+        mode: "0755"
+      when: not deadline_installed.stat.exists
+
+    # Unattended install wired straight to the RCS using the staged cert.
+    # Guarded by the install marker so it never runs twice.
+    - name: Install the Deadline client (unattended, Remote connection to the RCS)
+      ansible.builtin.command:
+        cmd: >-
+          {{ installer_tmp }}
+          --mode unattended
+          --unattendedmodeui none
+          --prefix {{ install_prefix }}
+          --connectiontype Remote
+          --proxyrootdir {{ deadline_server }}
+          --proxycertificate {{ deadline_cert_dest }}
+          --proxycertificatepassword "{{ deadline_cert_password }}"
+          --noguimode true
+          --launcherdaemon true
+          --slavestartup true
+          --restartstalled true
+          --daemonuser {{ render_user }}
+        creates: "{{ deadline_command }}"
+      when: not deadline_installed.stat.exists
+      no_log: true  # command line carries the cert password
+
+    - name: Remove installer
+      ansible.builtin.file:
+        path: "{{ installer_tmp }}"
+        state: absent
+
+    - name: Re-check install marker after installer
+      ansible.builtin.stat:
+        path: "{{ deadline_command }}"
+      register: deadline_installed
+
+    # ================================================================== #
+    #  3. CONNECT TO THE RCS (idempotent)                                 #
+    # ================================================================== #
+    # Read the currently-configured proxy so we only reconfigure on drift.
+    # (Setting key may vary by Deadline build; failed_when:false keeps first
+    #  runs and older configs from erroring.)
+    - name: Get current Deadline server connection
+      ansible.builtin.command:
+        cmd: "{{ deadline_command }} -GetIniFileSetting ProxyRoot0"
+      register: current_server
+      changed_when: false
+      failed_when: false
+      when: deadline_installed.stat.exists
+
+    - name: Report Deadline connection state
+      ansible.builtin.debug:
+        msg: >-
+          Deadline server: have '{{ current_server.stdout | default("") | trim }}',
+          want '{{ deadline_server }}'.
+      when: deadline_installed.stat.exists
+
+    - name: Point the client at the RCS
+      ansible.builtin.command:
+        cmd: >-
+          {{ deadline_command }} -ChangeRepository Proxy
+          {{ deadline_server }}
+          {{ deadline_cert_dest }}
+          "{{ deadline_cert_password }}"
+      register: change_repo
+      changed_when: change_repo.rc == 0
+      no_log: true
+      when:
+        - deadline_installed.stat.exists
+        - (current_server.stdout | default("") | trim) != deadline_server
+
+    - name: Ensure the Deadline Launcher daemon is running
+      ansible.builtin.service:
+        name: deadline10launcher
+        state: started
+        enabled: true
+      when: deadline_installed.stat.exists
+
+    # ================================================================== #
+    #  4. PULL THE FARM DOCKER IMAGES (latest)                            #
+    # ================================================================== #
+    - name: Pull the latest of each farm image
+      community.docker.docker_image:
+        name: "{{ item }}"
+        tag: latest
+        source: pull
+        force_source: true   # re-pull so we converge on the newest 'latest'
+      loop: "{{ farm_images }}"
+      register: image_pulls
+
+    - name: Report pulled images
+      ansible.builtin.debug:
+        msg: "{{ item.item }} -> {{ item.image.Id | default('unchanged') }}"
+      loop: "{{ image_pulls.results }}"
+      loop_control:
+        label: "{{ item.item }}"

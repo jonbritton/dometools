@@ -1,0 +1,252 @@
+---
+# patch-compliance.yml
+#
+# Idempotent playbook that audits and (optionally) remediates three areas on
+# managed hosts:
+#   1. Security patches   – reports pending security updates, applies them.
+#   2. Docker engine      – checks installed version against a desired version.
+#   3. Autofs config      – syncs /etc/auto* mount/share maps from a network
+#                           share, only replacing files that actually differ.
+#
+# 
+# Usage:
+#   Audit only (no changes):
+#     ansible-playbook -i inventory patch-compliance.yml --check --diff
+#   Audit + remediate:
+#     ansible-playbook -i inventory patch-compliance.yml -e remediate=true --diff
+#
+# Override any of the vars below with -e or in group_vars/host_vars.
+
+- name: Audit and remediate security patches, Docker, and autofs config
+  hosts: all
+  become: true
+
+  vars:
+    # Master switch. When false the play only reports drift (like --check but
+    # lets individual reporting tasks still run). Set true to apply changes.
+    remediate: false
+
+    # Desired Docker engine version. Leave empty to skip the version-pinning 
+    # comparison and only report what is installed.
+    docker_desired_version: ""
+
+    # Common network share that holds the golden config. This is expected
+    # to already be mounted OR reachable as a path on the controller. 
+    config_share_root: "/mnt/netshare/config/autofs"
+
+    # The autofs files we manage. Golden copies live under config_share_root
+    # with the same basename.
+    autofs_files:
+      - /etc/auto.master
+      - /etc/auto.misc
+      - /etc/auto.home
+      - /etc/auto.shares
+
+  tasks:
+    # ------------------------------------------------------------------ #
+    #  0. Fact gathering used by later reports                            #
+    # ------------------------------------------------------------------ #
+    - name: Gather OS package facts
+      ansible.builtin.package_facts:
+        manager: auto
+
+    # ================================================================== #
+    #  1. SECURITY PATCHES                                                #
+    # ================================================================== #
+
+    # ---- Debian / Ubuntu ---------------------------------------------- #
+    - name: (Debian) Refresh apt cache
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+      when: ansible_os_family == "Debian"
+
+    - name: (Debian) Report pending security updates
+      ansible.builtin.shell:
+        cmd: >
+          apt-get -s dist-upgrade
+          | grep -i security || true
+      register: debian_security_pending
+      changed_when: false
+      check_mode: false
+      when: ansible_os_family == "Debian"
+
+    - name: (Debian) Show pending security updates
+      ansible.builtin.debug:
+        msg: >-
+          {{ (debian_security_pending.stdout_lines | length)
+             if debian_security_pending.stdout | default('') | length > 0
+             else 0 }} security-related package change(s) pending.
+      when: ansible_os_family == "Debian"
+
+    - name: (Debian) Apply security updates
+      ansible.builtin.apt:
+        upgrade: dist
+        update_cache: true
+      when:
+        - ansible_os_family == "Debian"
+        - remediate | bool
+      register: debian_patch_result
+
+    # ---- RedHat / CentOS / Rocky / Fedora ----------------------------- #
+    - name: (RedHat) Report pending security updates
+      ansible.builtin.shell:
+        cmd: yum --security check-update || true
+      register: redhat_security_pending
+      changed_when: false
+      check_mode: false
+      when: ansible_os_family == "RedHat"
+
+    - name: (RedHat) Show pending security updates
+      ansible.builtin.debug:
+        var: redhat_security_pending.stdout_lines
+      when: ansible_os_family == "RedHat"
+
+    - name: (RedHat) Apply security updates
+      ansible.builtin.dnf:
+        name: "*"
+        state: latest
+        security: true
+        update_cache: true
+      when:
+        - ansible_os_family == "RedHat"
+        - remediate | bool
+      register: redhat_patch_result
+
+    # ================================================================== #
+    #  2. DOCKER ENGINE VERSION                                           #
+    # ================================================================== #
+
+    - name: Check whether Docker is installed
+      ansible.builtin.command: docker version --format '{{ "{{" }}.Server.Version{{ "}}" }}'
+      register: docker_current
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Report Docker status
+      ansible.builtin.debug:
+        msg: >-
+          {{ 'Docker not installed / not running.'
+             if docker_current.rc != 0
+             else 'Docker server version: ' ~ docker_current.stdout }}
+
+    - name: Determine if Docker is at the desired version
+      ansible.builtin.set_fact:
+        docker_needs_update: >-
+          {{ docker_desired_version | length > 0
+             and (docker_current.rc != 0
+                  or docker_current.stdout != docker_desired_version) }}
+
+    - name: Report Docker version drift
+      ansible.builtin.debug:
+        msg: >-
+          Docker drift detected: have
+          '{{ docker_current.stdout | default("none") }}',
+          want '{{ docker_desired_version }}'.
+      when: docker_needs_update | bool
+
+    # Remediation: pin to the desired version. Package names differ slightly by
+    # family; both are idempotent because state=present with a version means apt
+    # /dnf only act when the installed version differs.
+    - name: (Debian) Install / pin desired Docker version
+      ansible.builtin.apt:
+        name: "docker-ce={{ docker_desired_version }}*"
+        state: present
+        update_cache: true
+        allow_downgrade: true
+      when:
+        - ansible_os_family == "Debian"
+        - docker_needs_update | bool
+        - remediate | bool
+
+    - name: (RedHat) Install / pin desired Docker version
+      ansible.builtin.dnf:
+        name: "docker-ce-{{ docker_desired_version }}"
+        state: present
+        allow_downgrade: true
+      when:
+        - ansible_os_family == "RedHat"
+        - docker_needs_update | bool
+        - remediate | bool
+
+    - name: Ensure Docker service is enabled and running
+      ansible.builtin.service:
+        name: docker
+        state: started
+        enabled: true
+      when:
+        - remediate | bool
+        - docker_current.rc == 0 or docker_needs_update | bool
+
+    # ================================================================== #
+    #  3. AUTOFS CONFIG FILES (/etc/auto*)                               #
+    # ================================================================== #
+
+    - name: Verify the golden config share is reachable
+      ansible.builtin.stat:
+        path: "{{ config_share_root }}"
+      register: share_stat
+
+    - name: Warn if config share is not present
+      ansible.builtin.debug:
+        msg: >-
+          Config share '{{ config_share_root }}' is not accessible on this host;
+          skipping autofs config sync.
+      when: not share_stat.stat.exists
+
+    - name: Stat golden copies on the share
+      ansible.builtin.stat:
+        path: "{{ config_share_root }}/{{ item | basename }}"
+        checksum_algorithm: sha256
+      register: golden_stat
+      loop: "{{ autofs_files }}"
+      when: share_stat.stat.exists
+
+    - name: Stat local autofs files
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: sha256
+      register: local_stat
+      loop: "{{ autofs_files }}"
+      when: share_stat.stat.exists
+
+    - name: Report autofs config drift
+      ansible.builtin.debug:
+        msg: >-
+          {{ item.0.item }}: {{
+            'MISSING golden copy on share' if not item.0.stat.exists
+            else 'in sync' if (item.1.stat.exists
+                               and item.0.stat.checksum == item.1.stat.checksum)
+            else 'DRIFT — will update from share' }}
+      loop: "{{ golden_stat.results | zip(local_stat.results) | list }}"
+      loop_control:
+        label: "{{ item.0.item }}"
+      when: share_stat.stat.exists
+
+    # copy with a checksum-based src: it only writes when content differs. 
+    # remote_src=true because the golden file lives on the mount, not the
+    # controller. Guarded so a missing golden copy never blanks a local file.
+    - name: Sync autofs config files from the share
+      ansible.builtin.copy:
+        src: "{{ config_share_root }}/{{ item.item | basename }}"
+        dest: "{{ item.item }}"
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0644"
+        backup: true
+      loop: "{{ golden_stat.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      when:
+        - share_stat.stat.exists
+        - remediate | bool
+        - item.stat.exists
+      notify: Reload autofs
+
+  handlers:
+    - name: Reload autofs
+      ansible.builtin.service:
+        name: autofs
+        state: reloaded
